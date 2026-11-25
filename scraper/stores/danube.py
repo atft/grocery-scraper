@@ -132,11 +132,18 @@ async def choose_branch(page, base: str = BASE, branch: Optional[str] = None) ->
              s.dispatchEvent(new Event('change', {bubbles: true}));
            }""", branch)
     await page.wait_for_timeout(800)
-    await page.get_by_role("button", name="اختار").first.click()
+    # confirming reloads the page: wait for that reload to finish, otherwise
+    # the next page.goto gets cancelled (net::ERR_ABORTED)
     try:
-        await page.wait_for_load_state("networkidle", timeout=20000)
+        async with page.expect_navigation(wait_until="domcontentloaded", timeout=20000):
+            await page.get_by_role("button", name="اختار").first.click()
     except Exception:
         pass
+    try:
+        await page.wait_for_load_state("networkidle", timeout=15000)
+    except Exception:
+        pass
+    await page.wait_for_timeout(1500)
     log.info("danube: branch selected (%s)", branch)
     return True
 
@@ -168,7 +175,15 @@ async def _crawl_with_browser(limit: Optional[int], base: str = BASE) -> AsyncIt
         dumps = 0
 
         async def load(url: str) -> str:
-            await page.goto(url, wait_until="domcontentloaded", timeout=60000)
+            for attempt in range(3):
+                try:
+                    await page.goto(url, wait_until="domcontentloaded", timeout=60000)
+                    break
+                except Exception as e:  # e.g. net::ERR_ABORTED while a reload is running
+                    if attempt == 2:
+                        raise
+                    log.info("danube: retry %s (%s)", url, str(e).splitlines()[0])
+                    await page.wait_for_timeout(3000 * (attempt + 1))
             try:
                 await page.wait_for_selector("div.product-box", timeout=20000)
             except Exception:
@@ -178,7 +193,11 @@ async def _crawl_with_browser(limit: Optional[int], base: str = BASE) -> AsyncIt
 
         for dept in GROCERY_DEPARTMENTS:
             url = f"{base}/departments/{dept}"
-            html = await load(url)
+            try:
+                html = await load(url)
+            except Exception as e:
+                log.warning("danube %s: skipped (%s)", dept, str(e).splitlines()[0])
+                continue
             pages = last_page(html)
             cards = parse_cards(html, dept)
             log.info("danube %s: %d pages, %d products on page 1", dept, pages, len(cards))
@@ -187,7 +206,11 @@ async def _crawl_with_browser(limit: Optional[int], base: str = BASE) -> AsyncIt
                 dumps += 1
             for n in range(1, pages + 1):
                 if n > 1:
-                    html = await load(f"{url}?page={n}")
+                    try:
+                        html = await load(f"{url}?page={n}")
+                    except Exception as e:
+                        log.warning("danube %s page %d: skipped (%s)", dept, n, str(e).splitlines()[0])
+                        continue
                     cards = parse_cards(html, dept)
                 for o in cards:
                     if o.store_sku in seen:
