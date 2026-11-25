@@ -3,7 +3,7 @@ name: scrape-prices
 on:
   schedule:
     # Full catalogue: every night ~02:17 Riyadh time (23:17 UTC)
-    - cron: "17 23 * * *"
+    - cron: "17 22 * * *"
     # Quick price refresh of watched items: hourly 07:23–00:23 Riyadh (04–21 UTC)
     - cron: "23 4-21 * * *"
   workflow_dispatch:
@@ -26,7 +26,7 @@ env:
 
 jobs:
   full:
-    if: github.event.schedule == '17 23 * * *' || github.event.inputs.mode == 'full'
+    if: github.event.schedule == '17 22 * * *' || github.event.inputs.mode == 'full'
     runs-on: ubuntu-latest
     timeout-minutes: 300
     strategy:
