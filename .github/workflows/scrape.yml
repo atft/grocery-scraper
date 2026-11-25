@@ -38,9 +38,11 @@ jobs:
       - uses: actions/setup-python@v5
         with: { python-version: "3.12", cache: pip }
       - run: pip install -r requirements.txt
-      - if: matrix.store == 'danube'
+      - if: matrix.store == 'danube' && (github.event_name != 'workflow_dispatch' || contains(github.event.inputs.stores, matrix.store))
         run: python -m playwright install --with-deps chromium
       - name: crawl ${{ matrix.store }}
+        # on a manual run, only the stores typed in "stores" are crawled
+        if: github.event_name != 'workflow_dispatch' || contains(github.event.inputs.stores, matrix.store)
         run: python -m scraper.run full --stores ${{ matrix.store }}
       - name: keep debug screenshots
         if: always()
