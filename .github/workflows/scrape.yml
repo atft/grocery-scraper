@@ -42,6 +42,13 @@ jobs:
         run: python -m playwright install --with-deps chromium
       - name: crawl ${{ matrix.store }}
         run: python -m scraper.run full --stores ${{ matrix.store }}
+      - name: keep debug screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-${{ matrix.store }}
+          path: out/
+          if-no-files-found: ignore
 
   match:
     needs: full
