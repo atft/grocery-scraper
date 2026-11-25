@@ -4,8 +4,9 @@ How the data is reached (checked 2026-11-24):
 - There is no sitemap, and department pages fill their product grid in the
   browser after the visitor picks a city/branch. So this store is read with a
   headless browser (Playwright), page by page, the same way a visitor sees it.
-- Branch is held in the `danube_district_id` cookie: 589 = Hayat Mall, Riyadh
-  (pickup). `show_store_selector=false` hides the branch pop-up.
+- Branch: the crawler picks 'pickup' + 'حياة' (Hayat Mall, Riyadh) in the site's
+  pop-up like a visitor. The cookie `danube_district_id=589` alone is not enough
+  for the product grid (first run returned 0), but is sent on product pages.
 - Each product card (div.product-box) has: link /products/<slug>, name,
   current price, and original price when on offer. Prices use Arabic digits.
 - Product pages are server-rendered with schema.org JSON-LD (name, sku, brand,
@@ -97,18 +98,74 @@ def parse_product(html: str, url: Optional[str] = None) -> Optional[Offer]:
     return offer
 
 
-async def _crawl_with_browser(limit: Optional[int]) -> AsyncIterator[Offer]:
+BRANCH_NAME = "حياة"  # Hayat Mall, Riyadh – as written in the site's branch list
+BROWSER_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+              "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
+
+
+async def choose_branch(page, base: str = BASE, branch: Optional[str] = None) -> bool:
+    """Pick 'pickup from store' + the Riyadh branch in the site's own pop-up,
+    exactly as a visitor does. The site keeps the choice in its session."""
+    branch = branch or BRANCH_NAME
+    await page.goto(f"{base}/departments/pantry", wait_until="domcontentloaded", timeout=60000)
+    pickup = page.get_by_text("الإستلام من المتجر").first
+    try:
+        await pickup.wait_for(state="visible", timeout=20000)
+    except Exception:
+        log.warning("danube: branch pop-up did not appear")
+        return False
+    await pickup.click()
+    # the branch list is filled after the click
+    try:
+        await page.wait_for_function(
+            """(name) => [...document.querySelectorAll('select')]
+                 .some(s => [...s.options].some(o => o.text.trim() === name))""",
+            arg=branch, timeout=20000)
+    except Exception:
+        log.warning("danube: branch %s not found in the list", branch)
+        return False
+    await page.evaluate(
+        """(name) => {
+             const s = [...document.querySelectorAll('select')]
+               .find(s => [...s.options].some(o => o.text.trim() === name));
+             s.selectedIndex = [...s.options].findIndex(o => o.text.trim() === name);
+             s.dispatchEvent(new Event('change', {bubbles: true}));
+           }""", branch)
+    await page.wait_for_timeout(800)
+    await page.get_by_role("button", name="اختار").first.click()
+    try:
+        await page.wait_for_load_state("networkidle", timeout=20000)
+    except Exception:
+        pass
+    log.info("danube: branch selected (%s)", branch)
+    return True
+
+
+async def _debug_dump(page, label: str):
+    """When a page shows no products, keep a screenshot + text to see why."""
+    from pathlib import Path
+    Path("out").mkdir(exist_ok=True)
+    try:
+        await page.screenshot(path=f"out/danube-{label}.png", full_page=False)
+        text = (await page.inner_text("body"))[:400].replace("\n", " | ")
+        log.warning("danube %s: no products. title=%r url=%s text=%s",
+                    label, await page.title(), page.url, text)
+    except Exception as e:
+        log.warning("danube %s: debug dump failed: %s", label, e)
+
+
+async def _crawl_with_browser(limit: Optional[int], base: str = BASE) -> AsyncIterator[Offer]:
     from playwright.async_api import async_playwright
 
     async with async_playwright() as pw:
-        browser = await pw.chromium.launch()
-        ctx = await browser.new_context(locale="ar-SA")
-        await ctx.add_cookies([
-            {"name": k, "value": v, "domain": "danube.sa", "path": "/"} for k, v in COOKIES.items()
-        ])
+        browser = await pw.chromium.launch(args=["--disable-blink-features=AutomationControlled"])
+        ctx = await browser.new_context(locale="ar-SA", timezone_id="Asia/Riyadh",
+                                        user_agent=BROWSER_UA, viewport={"width": 1366, "height": 900})
         page = await ctx.new_page()
+        await choose_branch(page, base)
         seen: set[str] = set()
         count = 0
+        dumps = 0
 
         async def load(url: str) -> str:
             await page.goto(url, wait_until="domcontentloaded", timeout=60000)
@@ -116,18 +173,23 @@ async def _crawl_with_browser(limit: Optional[int]) -> AsyncIterator[Offer]:
                 await page.wait_for_selector("div.product-box", timeout=20000)
             except Exception:
                 pass
-            await asyncio.sleep(1.0)
+            await page.wait_for_timeout(800)
             return await page.content()
 
         for dept in GROCERY_DEPARTMENTS:
-            url = f"{BASE}/departments/{dept}"
+            url = f"{base}/departments/{dept}"
             html = await load(url)
             pages = last_page(html)
-            log.info("danube %s: %d pages", dept, pages)
+            cards = parse_cards(html, dept)
+            log.info("danube %s: %d pages, %d products on page 1", dept, pages, len(cards))
+            if not cards and dumps < 2:
+                await _debug_dump(page, dept)
+                dumps += 1
             for n in range(1, pages + 1):
                 if n > 1:
                     html = await load(f"{url}?page={n}")
-                for o in parse_cards(html, dept):
+                    cards = parse_cards(html, dept)
+                for o in cards:
                     if o.store_sku in seen:
                         continue
                     seen.add(o.store_sku)
