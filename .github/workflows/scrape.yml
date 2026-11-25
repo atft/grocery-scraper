@@ -54,8 +54,10 @@ jobs:
 
   match:
     needs: full
-    if: always() && needs.full.result != 'skipped'
+    # after the nightly/manual full crawl, or on its own with mode = match
+    if: always() && (needs.full.result == 'success' || needs.full.result == 'failure' || github.event.inputs.mode == 'match')
     runs-on: ubuntu-latest
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
