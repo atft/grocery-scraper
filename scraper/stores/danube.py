@@ -79,7 +79,7 @@ def parse_cards(html: str, category: str = "") -> list[Offer]:
 
 
 def last_page(html: str) -> int:
-    nums = [int(n) for n in re.findall(r"[?&]page=(\d+)", html)]
+    nums = [int(n) for n in re.findall(r"(?:[?&]|&amp;)page=(\d+)", html)]
     return max(nums) if nums else 1
 
 
@@ -98,6 +98,10 @@ def parse_product(html: str, url: Optional[str] = None) -> Optional[Offer]:
     return offer
 
 
+MAX_PAGES_PER_DEPT = 400
+# instantsearch.js pagination 'next' link (site uses instantsearch v2), with fallbacks
+NEXT_SELECTOR = (".ais-pagination--item__next a, .ais-Pagination-item--nextPage a, "
+                 "a[aria-label='Next'], a[aria-label='التالي'], li.next a, a:text-is('›')")
 BRANCH_NAME = "حياة"  # Hayat Mall, Riyadh – as written in the site's branch list
 BROWSER_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
               "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
@@ -191,6 +195,32 @@ async def _crawl_with_browser(limit: Optional[int], base: str = BASE) -> AsyncIt
             await page.wait_for_timeout(800)
             return await page.content()
 
+        async def first_slug() -> str:
+            return await page.evaluate(
+                "() => document.querySelector('div.product-box a[href^=\\'/products/\\']')?.getAttribute('href') || ''")
+
+        async def go_next() -> bool:
+            """Click the grid's own 'next page' control, like a visitor.
+            Returns False when there is no next page."""
+            nxt = page.locator(NEXT_SELECTOR).first
+            if await nxt.count() == 0 or not await nxt.is_visible():
+                return False
+            disabled = await nxt.evaluate(
+                "a => !a.getAttribute('href') || /disabled/.test(a.className + ' ' + (a.parentElement?.className||''))")
+            if disabled:
+                return False
+            before = await first_slug()
+            await nxt.click()
+            try:  # the grid is re-rendered in place: wait for different products
+                await page.wait_for_function(
+                    "(b) => { const a = document.querySelector('div.product-box a[href^=\\'/products/\\']');"
+                    " return a && a.getAttribute('href') !== b; }", arg=before, timeout=20000)
+            except Exception:
+                return False
+            await page.wait_for_timeout(500)
+            return True
+
+        logged_pagination = False
         for dept in GROCERY_DEPARTMENTS:
             url = f"{base}/departments/{dept}"
             try:
@@ -198,29 +228,39 @@ async def _crawl_with_browser(limit: Optional[int], base: str = BASE) -> AsyncIt
             except Exception as e:
                 log.warning("danube %s: skipped (%s)", dept, str(e).splitlines()[0])
                 continue
-            pages = last_page(html)
             cards = parse_cards(html, dept)
-            log.info("danube %s: %d pages, %d products on page 1", dept, pages, len(cards))
             if not cards and dumps < 2:
                 await _debug_dump(page, dept)
                 dumps += 1
-            for n in range(1, pages + 1):
-                if n > 1:
-                    try:
-                        html = await load(f"{url}?page={n}")
-                    except Exception as e:
-                        log.warning("danube %s page %d: skipped (%s)", dept, n, str(e).splitlines()[0])
-                        continue
-                    cards = parse_cards(html, dept)
+            if not logged_pagination:
+                pag = await page.evaluate(
+                    "() => (document.querySelector('.ais-pagination, .pagination, [class*=pagination]')"
+                    "?.outerHTML || 'no pagination element').slice(0, 400)")
+                log.info("danube pagination html: %s", pag)
+                logged_pagination = True
+            pages_read, dept_new = 0, 0
+            while True:
+                pages_read += 1
                 for o in cards:
                     if o.store_sku in seen:
                         continue
                     seen.add(o.store_sku)
+                    dept_new += 1
                     yield o
                     count += 1
                     if limit and count >= limit:
                         await browser.close()
                         return
+                if pages_read >= MAX_PAGES_PER_DEPT:
+                    break
+                try:
+                    if not await go_next():
+                        break
+                except Exception as e:
+                    log.warning("danube %s: stopped at page %d (%s)", dept, pages_read, str(e).splitlines()[0])
+                    break
+                cards = parse_cards(await page.content(), dept)
+            log.info("danube %s: %d pages, %d new products", dept, pages_read, dept_new)
         await browser.close()
 
 
