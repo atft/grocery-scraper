@@ -68,7 +68,7 @@ class Supabase:
 
     def unmatched(self, store: Optional[str] = None, limit: int = 1000) -> list[dict]:
         params = {"select": "id,store_id,name_ar,brand,size_value,size_unit",
-                  "product_id": "is.null", "limit": str(limit)}
+                  "product_id": "is.null", "order": "id", "limit": str(limit)}
         if store:
             params["store_id"] = f"eq.{store}"
         return self.select("store_products", params)

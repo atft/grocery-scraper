@@ -18,7 +18,8 @@ from .common import normalize_digits, parse_size
 
 log = logging.getLogger(__name__)
 
-ACCEPT = 0.78     # link automatically
+ACCEPT = 0.72     # link automatically (both sizes known and equal)
+ACCEPT_NO_SIZE = 0.85  # stricter when a pack size is missing
 GREY = 0.55       # ask Gemini between GREY and ACCEPT
 
 _DIACRITICS = re.compile(r"[ؐ-ًؚ-ٰٟۖ-ۭـ]")
@@ -38,18 +39,61 @@ def normalize_ar(text: Optional[str]) -> str:
     t = t.replace("ى", "ي").replace("ة", "ه").replace("ؤ", "و").replace("ئ", "ي")
     t = _UNIT_WORDS.sub(" ", t)
     t = re.sub(r"[^\w\s]", " ", t)
-    words = [w[2:] if w.startswith("ال") and len(w) > 4 else w for w in t.split()]
-    return " ".join(w for w in words if w not in _STOP and not w.isdigit())
+    return " ".join(t.split())
+
+
+_PREFIXES = ("وال", "بال", "لل", "ال", "و", "ب")
+
+
+def _stem(w: str) -> str:
+    """Strip attached و / ب / ال (e.g. والكرز -> كرز, بالزبده -> زبده)."""
+    for p in _PREFIXES:
+        if w.startswith(p) and len(w) - len(p) >= 3:
+            return w[len(p):]
+    return w
+
+
+def tokens(text: Optional[str]) -> list[str]:
+    out = []
+    for w in normalize_ar(text).split():
+        w = _stem(w)
+        if w in _STOP or w.isdigit() or len(w) < 2:
+            continue
+        if w not in out:
+            out.append(w)
+    return out
+
+
+def _same_word(a: str, b: str) -> bool:
+    if a == b:
+        return True
+    if min(len(a), len(b)) >= 4 and (a.startswith(b) or b.startswith(a)):
+        return True  # شوكو / شوكولاته
+    return len(a) >= 4 and len(b) >= 4 and SequenceMatcher(None, a, b).ratio() >= 0.8  # امريكانا / اميركانا
+
+
+def _matched(ta: list[str], tb: list[str]) -> int:
+    used, m = set(), 0
+    for a in ta:
+        for j, b in enumerate(tb):
+            if j not in used and _same_word(a, b):
+                used.add(j)
+                m += 1
+                break
+    return m
 
 
 def name_score(a: str, b: str) -> float:
-    na, nb = normalize_ar(a), normalize_ar(b)
-    if not na or not nb:
+    """F1 of fuzzily-matched words (0..1); 0 when the brands clearly differ.
+    The brand is the first word in almost every listing here."""
+    ta, tb = tokens(a), tokens(b)
+    if not ta or not tb:
         return 0.0
-    ta, tb = set(na.split()), set(nb.split())
-    jacc = len(ta & tb) / len(ta | tb)
-    seq = SequenceMatcher(None, " ".join(sorted(ta)), " ".join(sorted(tb))).ratio()
-    return round(0.6 * jacc + 0.4 * seq, 3)
+    brand_ok = any(_same_word(ta[0], x) for x in tb) or any(_same_word(tb[0], x) for x in ta)
+    if not brand_ok:
+        return 0.0
+    m = _matched(ta, tb)
+    return round(2 * m / (len(ta) + len(tb)), 3)
 
 
 def same_size(a_name: str, b_val, b_unit) -> Optional[bool]:
@@ -91,35 +135,57 @@ def gemini_same_product(a: str, b: str) -> Optional[bool]:
 
 def decide(item: dict, candidates: list[dict]) -> tuple[Optional[int], str]:
     """Return (product_id or None, method)."""
-    best, best_score = None, 0.0
+    best, best_score, best_sized = None, 0.0, False
     for c in candidates:
-        s = name_score(item.get("name_ar", ""), c.get("name_ar", ""))
         size_ok = same_size(item.get("name_ar", ""), c.get("size_value"), item.get("size_unit"))
         if size_ok is False:
-            continue
-        if size_ok:
-            s += 0.05
-        if s > best_score:
-            best, best_score = c, s
-    if best and best_score >= ACCEPT:
+            continue  # different pack size is never the same product
+        sc = name_score(item.get("name_ar", ""), c.get("name_ar", ""))
+        if sc > best_score:
+            best, best_score, best_sized = c, sc, bool(size_ok)
+    if not best:
+        return None, "own"
+    if best_score >= (ACCEPT if best_sized else ACCEPT_NO_SIZE):
         return best["product_id"], "name"
-    if best and best_score >= GREY:
+    if best_score >= GREY:
         verdict = gemini_same_product(item.get("name_ar", ""), best.get("name_ar", ""))
         if verdict:
             return best["product_id"], "gemini"
     return None, "own"
 
 
-def match_unlinked(db, store: Optional[str] = None, limit: int = 2000) -> dict:
-    stats = {"name": 0, "gemini": 0, "own": 0}
-    for item in db.unmatched(store, limit):
-        pid, method = decide(item, db.candidates(item["id"]))
-        db.link(item["id"], pid, method)
-        stats[method] += 1
+def match_unlinked(db, store: Optional[str] = None, limit: int = 50000,
+                   workers: int = 6, batch: int = 1000) -> dict:
+    """Link every item that has no product yet. Supabase returns at most
+    1000 rows per request, so we work in batches until none are left."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    stats = {"name": 0, "gemini": 0, "own": 0, "errors": 0}
+    done: set = set()
+
+    def handle(item):
+        try:
+            pid, method = decide(item, db.candidates(item["id"]))
+            db.link(item["id"], pid, method)
+            return method
+        except Exception as e:  # one bad item must not stop the run
+            log.info("match failed for %s: %s", item.get("id"), e)
+            return "errors"
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        while sum(stats.values()) < limit:
+            items = [i for i in db.unmatched(store, min(batch, limit - sum(stats.values())))
+                     if i["id"] not in done]
+            if not items:
+                break  # nothing left (or only items that keep failing)
+            done.update(i["id"] for i in items)
+            for method in pool.map(handle, items):
+                stats[method] += 1
+            log.info("matching progress: %s", stats)
     return stats
 
 
 if __name__ == "__main__":  # quick manual check
     print(json.dumps({
-        "score": name_score("عافية زيت دوار الشمس 1.5 لتر", "زيت دوار الشمس عافية ١٫٥ لتر"),
+        "score": name_score("عافية زيت دوار الشمس 1.5 لتر", "عافية زيت دوار الشمس ١٫٥ لتر"),
     }, ensure_ascii=False))
