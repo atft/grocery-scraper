@@ -3,7 +3,7 @@ import asyncio
 import pytest
 
 from scraper.common import clean_barcodes, normalize_digits, parse_size, to_float, Offer
-from scraper.matching import name_score, normalize_ar, decide
+from scraper.matching import name_score, tokens, decide
 from scraper.stores import danube, lulu, panda, tamimi
 from tests import fixtures as fx
 
@@ -149,7 +149,7 @@ def test_danube_product_page_same_sku_as_card():
 
 # ------------------------------------------------------------------ matching
 def test_arabic_normalisation():
-    assert normalize_ar("الزيـت  النباتي ١٫٥ لتر") == normalize_ar("زيت النباتى 1.5 ل")
+    assert tokens("الزيـت  النباتي ١٫٥ لتر") == tokens("زيت النباتى 1.5 ل") == ["زيت", "نباتي"]
 
 
 def test_name_matching():
