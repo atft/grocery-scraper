@@ -57,8 +57,13 @@ def parse_listing(html: str, category_slug: str = "",
             price = to_float(v.get("price"))
             old = to_float(v.get("undiscounted_price"))
             size = parse_size(v.get("size"), v.get("unit")) if v.get("size") else (None, None)
+            by_name = parse_size(p.get("name"))
             if size == (None, None):
-                size = parse_size(p.get("name"))
+                size = by_name
+            elif (by_name[0] and by_name[1] == size[1] and by_name[0] > size[0]
+                  and abs(by_name[0] / size[0] - round(by_name[0] / size[0])) < 0.01):
+                # the size field is one unit; the name says it's a multipack ("2 × 1.5 لتر")
+                size = by_name
             offers.append(Offer(
                 store=STORE,
                 store_sku=str(v.get("sku") or v.get("id")),
