@@ -27,8 +27,24 @@ class Supabase:
             timeout=120,
         )
 
+    def _send(self, method: str, url: str, **kw):
+        """Retry temporary failures (5xx, timeouts) – the free Supabase tier
+        is a small machine and occasionally cancels a slow query."""
+        import time
+        for attempt in range(4):
+            try:
+                r = self.client.request(method, url, **kw)
+                if r.status_code < 500 or attempt == 3:
+                    return r
+                log.warning("%s %s -> HTTP %s, retrying: %s", method, url.split("?")[0], r.status_code, r.text[:200])
+            except httpx.TransportError as e:
+                if attempt == 3:
+                    raise
+                log.warning("%s %s failed (%s), retrying", method, url.split("?")[0], e)
+            time.sleep(5 * (attempt + 1) ** 2)  # 5s, 20s, 45s
+
     def rpc(self, fn: str, args: dict):
-        r = self.client.post(f"/rpc/{fn}", content=json.dumps(args, ensure_ascii=False))
+        r = self._send("POST", f"/rpc/{fn}", content=json.dumps(args, ensure_ascii=False))
         if r.status_code >= 400:
             # PostgREST puts the real database error in the body – show it
             raise RuntimeError(f"{fn} -> HTTP {r.status_code}: {r.text[:500]}")
@@ -72,8 +88,9 @@ class Supabase:
         return totals
 
     def select(self, table: str, params: dict) -> list[dict]:
-        r = self.client.get(f"/{table}", params=params)
-        r.raise_for_status()
+        r = self._send("GET", f"/{table}", params=params)
+        if r.status_code >= 400:
+            raise RuntimeError(f"GET {table} -> HTTP {r.status_code}: {r.text[:500]}")
         return r.json()
 
     def watched_urls(self, max_rows: int = 3000) -> dict[str, list[str]]:

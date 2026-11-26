@@ -156,7 +156,7 @@ def decide(item: dict, candidates: list[dict]) -> tuple[Optional[int], str]:
 
 
 def match_unlinked(db, store: Optional[str] = None, limit: int = 50000,
-                   workers: int = 6, batch: int = 1000) -> dict:
+                   workers: int = 4, batch: int = 500) -> dict:
     """Link every item that has no product yet. Supabase returns at most
     1000 rows per request, so we work in batches until none are left."""
     from concurrent.futures import ThreadPoolExecutor
