@@ -29,29 +29,46 @@ class Supabase:
 
     def rpc(self, fn: str, args: dict):
         r = self.client.post(f"/rpc/{fn}", content=json.dumps(args, ensure_ascii=False))
-        r.raise_for_status()
+        if r.status_code >= 400:
+            # PostgREST puts the real database error in the body – show it
+            raise RuntimeError(f"{fn} -> HTTP {r.status_code}: {r.text[:500]}")
         return r.json() if r.content else None
 
     def ingest(self, offers: Iterable[Offer], quick: bool = False, batch_size: int = 300) -> dict:
-        totals = {"new": 0, "changed": 0, "linked": 0, "sent": 0}
+        totals = {"new": 0, "changed": 0, "linked": 0, "errors": 0, "sent": 0}
         batch: list[dict] = []
 
-        def flush():
-            if not batch:
+        def send(rows: list[dict]):
+            """Send rows; if the database rejects the whole call, split it in
+            halves until the bad row is isolated, log it and skip it."""
+            try:
+                res = self.rpc("ingest_offers", {"payload": rows, "quick": quick}) or {}
+            except Exception as e:
+                if len(rows) == 1:
+                    log.error("skipped %s/%s (%s): %s", rows[0].get("store"), rows[0].get("store_sku"),
+                              rows[0].get("name_ar"), e)
+                    totals["errors"] += 1
+                    return
+                log.warning("batch of %d rejected, splitting: %s", len(rows), e)
+                mid = len(rows) // 2
+                send(rows[:mid])
+                send(rows[mid:])
                 return
-            res = self.rpc("ingest_offers", {"payload": batch, "quick": quick}) or {}
-            for k in ("new", "changed", "linked"):
+            for k in ("new", "changed", "linked", "errors"):
                 totals[k] += res.get(k, 0)
-            totals["sent"] += len(batch)
-            batch.clear()
+            for sample in res.get("error_samples") or []:
+                log.error("row skipped by database: %s", json.dumps(sample, ensure_ascii=False))
+            totals["sent"] += len(rows)
 
         for o in offers:
             if o.price is None:
                 continue
             batch.append(o.to_dict())
             if len(batch) >= batch_size:
-                flush()
-        flush()
+                send(batch)
+                batch = []
+        if batch:
+            send(batch)
         return totals
 
     def select(self, table: str, params: dict) -> list[dict]:

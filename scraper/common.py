@@ -40,7 +40,7 @@ class Offer:
     @property
     def unit_price(self) -> Optional[float]:
         """Price per kg / litre / piece, for fair comparison across pack sizes."""
-        if not self.price or not self.size_value:
+        if not self.price or not self.size_value or self.size_value <= 0:
             return None
         if self.size_unit in ("g", "ml"):
             return round(self.price / self.size_value * 1000, 3)
@@ -139,13 +139,16 @@ def parse_size(text: Optional[str], unit_hint: Optional[str] = None) -> tuple[Op
     if m:
         qty, unit, mult = float(m.group(1)), m.group(2), float(m.group(3))
         base, factor = _UNIT_MAP[unit]
-        return round(qty * factor * mult, 3), base
+        if qty * mult > 0:
+            return round(qty * factor * mult, 3), base
     best = None
     for m in _SIZE_RE.finditer(t):
         mult = float(m.group(1)) if m.group(1) else 1.0
         qty = float(m.group(2))
         base, factor = _UNIT_MAP[m.group(3)]
-        best = (round(mult * qty * factor, 3), base)  # last match wins: sizes sit at the end
+        val = round(mult * qty * factor, 3)
+        if val > 0:  # "0 جم سكر" is a claim, not a pack size
+            best = (val, base)  # last match wins: sizes sit at the end
     return best if best else (None, None)
 
 

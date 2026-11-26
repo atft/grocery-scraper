@@ -22,7 +22,8 @@ ACCEPT = 0.72     # link automatically (both sizes known and equal)
 ACCEPT_NO_SIZE = 0.85  # stricter when a pack size is missing
 GREY = 0.55       # ask Gemini between GREY and ACCEPT
 
-_DIACRITICS = re.compile(r"[ؐ-ًؚ-ٰٟۖ-ۭـ]")
+# Arabic diacritics (tashkeel: fatha, damma, kasra, shadda, sukun...) and tatweel "ـ"
+_DIACRITICS = re.compile(r"[\u0610-\u061A\u064B-\u065F\u0670\u06D6-\u06ED\u0640]")
 _STOP = {"من", "مع", "و", "في", "ال", "عبوة", "عبوه", "حجم", "اقتصادي", "اقتصادية",
          "جديد", "طازج", "pack", "of", "the", "and", "with", "x", "×"}
 _UNIT_WORDS = re.compile(
