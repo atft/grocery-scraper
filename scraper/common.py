@@ -84,13 +84,29 @@ def clean_barcodes(raw) -> list[str]:
         code = re.sub(r"\D", "", str(item))
         if not 8 <= len(code) <= 14:
             continue
-        norm = normalize_gtin(code)
+        norm = normalize_gtin(fix_check_digit(code))
         # GS1 prefix 2x = in-store / variable-weight codes: every chain reuses
         # them for different things, so they are useless for cross-store matching.
         if len(norm) in (12, 13) and norm.startswith("2"):
             continue
         out.append(norm)
     return list(dict.fromkeys(out))
+
+
+def gs1_check_digit(body: str) -> int:
+    """GS1 check digit for the digits before it (EAN-8/UPC-A/EAN-13/GTIN-14)."""
+    total = sum(int(d) * (3 if i % 2 == 0 else 1) for i, d in enumerate(reversed(body)))
+    return (10 - total % 10) % 10
+
+
+def fix_check_digit(code: str) -> str:
+    """Panda publishes barcodes with the last (check) digit set to 0. A barcode
+    whose check digit is wrong is not a valid GTIN, so recompute it."""
+    if len(code) in (8, 12, 13, 14) and code.isdigit():
+        good = gs1_check_digit(code[:-1])
+        if int(code[-1]) != good:
+            return code[:-1] + str(good)
+    return code
 
 
 def normalize_gtin(code: str) -> str:
