@@ -85,7 +85,8 @@ def test_panda_listing():
     assert paste.price == 10 and paste.old_price == 13.99
     assert paste.size_value == 135 and paste.size_unit == "g"
     assert paste.url == "https://panda.sa/ar/p/panda-tomato-paste-15200"
-    assert ranch.old_price is None and ranch.barcodes == ["717273504640"]
+    # Panda zeroes the check digit: 717273504640 -> real UPC 717273504646
+    assert ranch.old_price is None and ranch.barcodes == ["717273504646"]
     assert ranch.size_value == 267 and ranch.size_unit == "ml"
     assert tahina.barcodes == [] and tahina.in_stock is False
 
@@ -163,3 +164,27 @@ def test_name_matching():
     assert decide(item, cands) == (7, "name")
     # different size must never match even with an identical name
     assert decide(item, cands[1:]) == (None, "own")
+
+
+# ------------------------------------------------------------------ real sample 2026-11-26
+@pytest.mark.parametrize("panda,lulu", [
+    ("6281011216430", "6281011216435"),   # عافية تونة 80 جم
+    ("6281011419200", "6281011419201"),   # عافية تونة 90 جم
+    ("6281011701890", "6281011701894"),   # عافية زيت 2.9 لتر
+    ("6281011701870", "6281011701870"),   # check digit really is 0
+])
+def test_panda_zeroed_check_digit(panda, lulu):
+    assert clean_barcodes(panda) == clean_barcodes(lulu)
+
+
+def test_valid_barcodes_untouched():
+    for code in ["6281011701894", "6281062351765", "4015400245940", "717273504646"]:
+        assert clean_barcodes(code) == [code]
+
+
+def test_panda_multipack_size_from_name():
+    html = fx.next_page('5:["$","$L20",null,{"products":[{"id":1,"name":"عافية زيت دوار الشمس نقي عبوة مزدوجة 2 × 1.5 لتر",'
+                        '"varieties":[{"id":9,"price":"49.50","size":"1.5","unit":"لتر","barcode":"6281011702160","sku":9,'
+                        '"availability":1}]}],"totalPages":1}]')
+    o = panda.parse_listing(html)[0][0]
+    assert (o.size_value, o.size_unit) == (3000.0, "ml")
